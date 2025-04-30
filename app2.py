@@ -4,7 +4,6 @@ Created on Mon Apr  7 18:04:58 2025
 
 @author: KIIT
 """
-
 import streamlit as st
 import pickle
 import pandas as pd
@@ -113,41 +112,70 @@ def load_models():
 # Predict cluster using customer data
 def predict_cluster(kmeans, scaler, age, income, spending_score, gender_code=0, 
                     last_purchase=0, membership_years=1):
-    # Create DataFrame with input data
-    input_data = {
-        'age': age,
-        'income': income,
-        'spending_score': spending_score
-    }
-    
-    # Add optional features if the model expects them
-    feature_names = getattr(kmeans, 'feature_names_in_', ['age', 'income', 'spending_score'])
-    
-    if 'gender' in feature_names:
-        input_data['gender'] = gender_code
-    if 'last_purchase_amount' in feature_names:
-        input_data['last_purchase_amount'] = last_purchase
-    if 'membership_years' in feature_names:
-        input_data['membership_years'] = membership_years
-    
-    # Create DataFrame
-    input_df = pd.DataFrame([input_data])
-    
-    # Ensure all expected features are present
-    for feature in feature_names:
-        if feature not in input_df.columns:
-            input_df[feature] = 0
-    
-    # Make sure columns match the expected order
-    input_df = input_df[feature_names]
-    
-    # Scale the input data using the same scaler
-    scaled_input = scaler.transform(input_df)
-    
-    # Predict cluster
-    cluster = kmeans.predict(scaled_input)[0]
-    
-    return cluster
+    try:
+        # Create DataFrame with input data - start with basic features
+        input_data = {
+            'age': age,
+            'income': income,
+            'spending_score': spending_score
+        }
+        
+        # Get feature names expected by the model if available
+        if hasattr(kmeans, 'feature_names_in_'):
+            feature_names = kmeans.feature_names_in_
+        elif hasattr(scaler, 'feature_names_in_'):
+            feature_names = scaler.feature_names_in_
+        else:
+            # Default to basic features if not available
+            feature_names = ['age', 'income', 'spending_score']
+        
+        # Add additional features if they're expected
+        if 'gender' in feature_names:
+            input_data['gender'] = gender_code
+        
+        if 'gender_Male' in feature_names:
+            input_data['gender_Male'] = 1 if gender_code == 0 else 0
+            input_data['gender_Female'] = 1 if gender_code == 1 else 0
+            input_data['gender_Other'] = 1 if gender_code == 2 else 0
+            
+        if 'last_purchase_amount' in feature_names:
+            input_data['last_purchase_amount'] = last_purchase
+            
+        if 'membership_years' in feature_names:
+            input_data['membership_years'] = membership_years
+        
+        # Add preferred category features if needed
+        categories = ['Electronics', 'Groceries', 'Home & Garden', 'Sports']
+        for cat in categories:
+            column_name = f'preferred_category_{cat.replace(" & ", "_")}'
+            if column_name in feature_names:
+                input_data[column_name] = 0  # Set default to 0
+        
+        # Create DataFrame with our input data
+        input_df = pd.DataFrame([input_data])
+        
+        # Check if we're missing any expected features
+        for feature in feature_names:
+            if feature not in input_df.columns:
+                st.warning(f"Missing expected feature: {feature} - adding with default value 0")
+                input_df[feature] = 0
+        
+        # Make sure the input dataframe has exactly the columns needed by the model
+        input_df = input_df[feature_names]
+        
+        # Scale the input data
+        scaled_input = scaler.transform(input_df)
+        
+        # Predict cluster
+        cluster = kmeans.predict(scaled_input)[0]
+        
+        return cluster
+        
+    except Exception as e:
+        st.error(f"Error in prediction: {str(e)}")
+        st.error(f"Expected features: {feature_names if 'feature_names' in locals() else 'unknown'}")
+        st.error(f"Provided features: {list(input_data.keys())}")
+        return 0  # Return default cluster on error
 
 # Main Streamlit app
 def main():
@@ -178,6 +206,11 @@ def main():
         
         last_purchase = st.number_input("Last Purchase Amount ($)", 0, 10000, int(income * 0.05))
         membership_years = st.number_input("Membership Years", 0, 20, 1)
+        
+        # Add category selection if needed
+        if hasattr(kmeans, 'feature_names_in_') and any('preferred_category' in feature for feature in kmeans.feature_names_in_):
+            st.markdown("### Preferred Shopping Category")
+            category = st.selectbox("Category", ["Electronics", "Groceries", "Home & Garden", "Sports"])
     
     # Prediction button
     if st.button("Identify Customer Segment"):

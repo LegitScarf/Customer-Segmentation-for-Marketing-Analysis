@@ -106,7 +106,15 @@ def load_models():
 # Function to inspect model features
 def inspect_model_features(kmeans, scaler):
     try:
-        # Get feature names from scaler or kmeans model
+        default_features = ['age', 'income', 'spending_score', 'membership_years', 
+                           'purchase_frequency', 'last_purchase_amount']
+        
+        # First check if the model has n_features_in_ attribute
+        n_features = getattr(kmeans, 'n_features_in_', None)
+        if n_features:
+            st.sidebar.write(f"Model expects {n_features} features")
+        
+        # Try to get feature names from scaler or kmeans model
         if hasattr(scaler, 'feature_names_in_'):
             feature_names = scaler.feature_names_in_
             st.sidebar.write("### Expected Features (from scaler)")
@@ -117,17 +125,37 @@ def inspect_model_features(kmeans, scaler):
             st.sidebar.write("### Expected Features (from kmeans)")
             st.sidebar.write(", ".join(feature_names))
             return feature_names
+        elif n_features is not None:
+            # If we know how many features but not names, return appropriate number of defaults
+            if n_features == 6:
+                return default_features
+            elif n_features == 11:
+                # Add gender and category columns to match 11 features
+                return default_features + ['gender', 'preferred_category_Electronics', 
+                                         'preferred_category_Groceries', 
+                                         'preferred_category_Home_Garden', 
+                                         'preferred_category_Sports']
+            else:
+                st.sidebar.warning(f"Model expects {n_features} features but don't know names")
+                # Return at least the number of features needed with default names
+                return default_features + [f'feature_{i}' for i in range(len(default_features), n_features)]
         else:
             st.sidebar.warning("Model doesn't have feature_names_in_ attribute")
-            return ['age', 'income', 'spending_score']
+            return default_features
             
     except Exception as e:
         st.sidebar.error(f"Error inspecting model features: {str(e)}")
-        return ['age', 'income', 'spending_score']  # Return default features
+        return ['age', 'income', 'spending_score', 'membership_years', 
+                'purchase_frequency', 'last_purchase_amount']
 
 # Predict cluster using customer data
 def predict_cluster(kmeans, scaler, feature_names, user_inputs):
     try:
+        # Debug - print the shapes before proceeding
+        if 'show_debug' in st.session_state and st.session_state.show_debug:
+            st.sidebar.write(f"KMeans n_features_in_: {getattr(kmeans, 'n_features_in_', 'unknown')}")
+            st.sidebar.write(f"Scaler n_features_in_: {getattr(scaler, 'n_features_in_', 'unknown')}")
+        
         # Create a DataFrame with exactly the expected columns
         input_df = pd.DataFrame(columns=feature_names)
         
@@ -146,6 +174,49 @@ def predict_cluster(kmeans, scaler, feature_names, user_inputs):
                 # Simple heuristic: higher spending relative to income suggests higher frequency
                 ratio = user_inputs.get('last_purchase_amount', 0) / max(user_inputs.get('income', 1), 1)
                 input_df.loc[0, 'purchase_frequency'] = min(int(ratio * 20), 10)  # Scale to reasonable value
+        
+        # Check for gender encoding columns
+        gender_columns = ['gender_Male', 'gender_Female', 'gender_Other']
+        for col in gender_columns:
+            if col in feature_names and col not in user_inputs:
+                # Extract gender from the base gender field if available
+                gender_val = user_inputs.get('gender', 0)  # Default to male (0)
+                gender_type = col.split('_')[1]
+                # Set to 1 if this column matches the gender, 0 otherwise
+                if (gender_type == 'Male' and gender_val == 0) or \
+                   (gender_type == 'Female' and gender_val == 1) or \
+                   (gender_type == 'Other' and gender_val == 2):
+                    input_df.loc[0, col] = 1
+        
+        # Special handling for preferred category columns
+        categories = ["Electronics", "Groceries", "Home & Garden", "Sports"]
+        selected_category = user_inputs.get('selected_category', categories[0])
+        for category in categories:
+            cat_feature = f"preferred_category_{category.replace(' & ', '_')}"
+            if cat_feature in feature_names:
+                input_df.loc[0, cat_feature] = 1 if category == selected_category else 0
+        
+        # Check if we're missing any expected features compared to what the model needs
+        n_features_expected = getattr(kmeans, 'n_features_in_', len(feature_names))
+        if input_df.shape[1] != n_features_expected:
+            st.warning(f"Feature count mismatch: DataFrame has {input_df.shape[1]} features but model expects {n_features_expected}")
+            
+            # Try to fix by getting the column order right
+            if hasattr(scaler, 'feature_names_in_') and len(scaler.feature_names_in_) == n_features_expected:
+                # Use exact feature names and order from scaler
+                missing_cols = [col for col in scaler.feature_names_in_ if col not in input_df.columns]
+                for col in missing_cols:
+                    input_df[col] = 0  # Add missing columns with default value
+                
+                # Ensure exact column order
+                input_df = input_df[scaler.feature_names_in_]
+                st.success(f"Fixed feature count: now using {input_df.shape[1]} features in correct order")
+                
+        # Debug - Print the final DataFrame columns
+        if 'show_debug' in st.session_state and st.session_state.show_debug:
+            st.sidebar.write("### Final Input Features")
+            st.sidebar.write(f"Feature count: {input_df.shape[1]}")
+            st.sidebar.write(", ".join(input_df.columns.tolist()))
         
         # Scale the input data
         scaled_input = scaler.transform(input_df)
@@ -189,6 +260,16 @@ def main():
     # Track all user inputs in a dictionary
     user_inputs = {}
     
+    # Store debug option in session state so it's accessible in functions
+    show_debug = st.sidebar.checkbox("Show Debug Information")
+    st.session_state.show_debug = show_debug
+    
+    # Display expected columns in exact order if available
+    if show_debug and hasattr(scaler, 'feature_names_in_'):
+        st.sidebar.write("### Expected Features in Order")
+        for i, feature in enumerate(scaler.feature_names_in_):
+            st.sidebar.write(f"{i}: {feature}")
+    
     # Input fields
     with col1:
         user_inputs['age'] = st.slider("Age", 18, 100, 30)
@@ -198,35 +279,44 @@ def main():
     # Additional fields
     with col2:
         st.markdown("### Additional Details")
-        # Handle gender column exactly as expected by the model
-        if 'gender' in feature_names:
-            gender_options = ["Male", "Female", "Other"]
-            gender_index = st.radio("Gender", gender_options, index=0)
-            user_inputs['gender'] = gender_options.index(gender_index)
+        
+        # Handle gender - more flexible approach
+        gender_options = ["Male", "Female", "Other"]
+        gender_index = st.radio("Gender", gender_options, index=0)
+        user_inputs['gender'] = gender_options.index(gender_index)
+        
+        # Handle gender encoding columns if needed
+        for i, gender_type in enumerate(gender_options):
+            col_name = f"gender_{gender_type}"
+            if col_name in feature_names:
+                user_inputs[col_name] = 1 if i == user_inputs['gender'] else 0
         
         # Purchase history
         user_inputs['last_purchase_amount'] = st.number_input("Last Purchase Amount ($)", 0, 10000, int(user_inputs['income'] * 0.05))
         user_inputs['membership_years'] = st.number_input("Membership Years", 0, 20, 1)
-        
-        if 'purchase_frequency' in feature_names:
-            user_inputs['purchase_frequency'] = st.slider("Purchase Frequency (per month)", 0, 10, 2)
+        user_inputs['purchase_frequency'] = st.slider("Purchase Frequency (per month)", 0, 10, 2)
     
     # Preferred categories section
-    if any('preferred_category' in feature for feature in feature_names):
-        st.markdown("### Preferred Shopping Category")
-        categories = ["Electronics", "Groceries", "Home & Garden", "Sports"]
-        selected_category = st.selectbox("Primary Category", categories)
-        
-        # Set all category flags correctly
-        for category in categories:
-            category_feature = f"preferred_category_{category.replace(' & ', '_')}"
-            if category_feature in feature_names:
-                user_inputs[category_feature] = 1 if category == selected_category else 0
+    categories = ["Electronics", "Groceries", "Home & Garden", "Sports"]
+    selected_category = st.selectbox("Primary Category", categories)
+    user_inputs['selected_category'] = selected_category
     
     # For debugging
     if show_debug:
         st.sidebar.write("### User Inputs")
         st.sidebar.write(user_inputs)
+        
+        # Display manual feature order correction option
+        st.sidebar.write("### Manual Feature Order Fix")
+        manual_fix = st.sidebar.checkbox("Use Manual Feature Order")
+        if manual_fix:
+            feature_order = st.sidebar.text_area("Enter feature names in order (one per line)", 
+                                             "age\nincome\nspending_score\nmembership_years\npurchase_frequency\nlast_purchase_amount\ngender\npreferred_category_Electronics\npreferred_category_Groceries\npreferred_category_Home_Garden\npreferred_category_Sports")
+            if feature_order:
+                manual_features = [f.strip() for f in feature_order.split('\n') if f.strip()]
+                if len(manual_features) > 0:
+                    feature_names = manual_features
+                    st.sidebar.success(f"Using {len(manual_features)} manually specified features")
     
     # Prediction button
     if st.button("Identify Customer Segment"):
